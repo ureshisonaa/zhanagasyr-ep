@@ -22,11 +22,11 @@ class EnvironmentVariables {
   @IsInt()
   @Min(0)
   @Max(65535)
-  PORT = 4000;
+  PORT: number = 4000;
 
   @IsString()
   @IsNotEmpty()
-  API_PREFIX = 'api/v1';
+  API_PREFIX: string = 'api/v1';
 
   @IsString()
   @IsNotEmpty()
@@ -42,11 +42,11 @@ class EnvironmentVariables {
 
   @IsString()
   @IsOptional()
-  JWT_ACCESS_EXPIRES_IN = '15m';
+  JWT_ACCESS_EXPIRES_IN: string = '15m';
 
   @IsString()
   @IsOptional()
-  JWT_REFRESH_EXPIRES_IN = '7d';
+  JWT_REFRESH_EXPIRES_IN: string = '7d';
 
   @IsString()
   @IsOptional()
@@ -54,15 +54,15 @@ class EnvironmentVariables {
 
   @IsString()
   @IsOptional()
-  OPENAI_MODEL = 'gpt-5.5';
+  OPENAI_MODEL: string = 'gpt-5.5';
 
   @IsString()
   @IsOptional()
-  OPENAI_EMBEDDING_MODEL = 'text-embedding-3-small';
+  OPENAI_EMBEDDING_MODEL: string = 'text-embedding-3-small';
 
   @IsInt()
   @IsOptional()
-  OPENAI_TIMEOUT_MS = 60000;
+  OPENAI_TIMEOUT_MS: number = 60000;
 
   @IsString()
   @IsOptional()
@@ -78,7 +78,7 @@ class EnvironmentVariables {
 
   @IsString()
   @IsOptional()
-  QDRANT_URL = 'http://localhost:6333';
+  QDRANT_URL: string = 'http://localhost:6333';
 
   @IsString()
   @IsOptional()
@@ -86,11 +86,11 @@ class EnvironmentVariables {
 
   @IsString()
   @IsNotEmpty()
-  CORS_ORIGIN = 'http://localhost:5173';
+  CORS_ORIGIN: string = 'http://localhost:5173';
 
   @IsInt()
   @IsOptional()
-  THROTTLE_TTL = 60000;
+  THROTTLE_TTL: number = 60000;
 
   @IsString()
   @IsOptional()
@@ -98,7 +98,7 @@ class EnvironmentVariables {
 
   @IsInt()
   @IsOptional()
-  THROTTLE_LIMIT = 100;
+  THROTTLE_LIMIT: number = 100;
 }
 
 export function validateEnv(config: Record<string, unknown>): EnvironmentVariables {
