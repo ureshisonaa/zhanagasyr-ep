@@ -1,0 +1,756 @@
+// ZhanaGasyr Education Platform — Prisma Schema
+//
+// Соглашение об именовании (архитектурное решение Этапа 0.2, ТЗ явно не
+// регламентирует): модели — PascalCase (как принято в Prisma/TS), таблицы
+// и колонки в самой PostgreSQL — snake_case через @@map/@map. Это стандартная
+// практика для Prisma + Postgres и не противоречит требованиям ТЗ.
+//
+// Модели добавляются строго по этапам Roadmap. Этап 0.2: User, Role
+// (минимум, необходимый для последующей Авторизации — Этап 1.1).
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+/// Роли пользователей (Student/Mentor/Admin/SuperAdmin).
+/// Справочник, а не enum — управляется через Admin Panel (Этап 11.1),
+/// без изменения схемы БД при появлении новых ролей в будущем.
+model Role {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String   @unique
+  description String?
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  users User[]
+
+  @@map("roles")
+}
+
+/// Основная таблица пользователей (Часть 2, п.3 ТЗ).
+/// Удаление запрещено — используется isActive=false (Часть 2, п.20).
+model User {
+  id        String    @id @default(uuid()) @db.Uuid
+  email     String    @unique
+  password  String
+  firstName String    @map("first_name")
+  lastName  String    @map("last_name")
+  phone     String?   @unique
+  country   String?
+  city      String?
+  birthDate DateTime? @map("birth_date") @db.Date
+  avatar    String?
+  isActive  Boolean   @default(true) @map("is_active")
+  /// Используется для ревокации refresh-токенов при logout (Auth, Этап 1.1):
+  /// инкрементируется при logout, refresh-токен с устаревшим значением отклоняется.
+  /// Ограничение: инвалидирует ВСЕ сессии пользователя разом, а не одну конкретную —
+  /// для инвалидации по устройствам в будущем потребуется отдельная таблица сессий.
+  tokenVersion Int     @default(0) @map("token_version")
+  roleId    String    @map("role_id") @db.Uuid
+  role      Role      @relation(fields: [roleId], references: [id])
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+
+  applications Application[]
+  documents    Document[]
+  driveFolders UserDriveFolder[]
+  chats        Chat[]
+  aiSessions   AiSession[]
+  calendarEvents CalendarEvent[]
+  notifications Notification[]
+  notes         Note[]
+  activityLogEntries ActivityLogEntry[]
+  mentorComments MentorComment[]
+  settings UserSettings?
+  adminLogEntries AdminLogEntry[]
+  /// Кэш ID корневой папки Students/{userId}/ в Google Drive (Этап 4.2) —
+  /// без него пришлось бы искать/создавать эту папку на каждую загрузку.
+  driveRootFolderId String? @map("drive_root_folder_id")
+
+  @@index([email])
+  @@index([roleId])
+  @@map("users")
+}
+
+/// Справочник университетов (Часть 2, п.5 ТЗ). isActive — soft-delete
+/// (не жёсткое удаление): начиная с Фазы 3 на University будут ссылаться
+/// Applications, а с Фазы 2.2 — Programs, поэтому hard delete создавал бы
+/// проблему целостности данных или непредсказуемый каскад.
+model University {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String
+  country     String
+  city        String
+  logo        String?
+  website     String?
+  description String?  @db.Text
+  ranking     Int?
+  tuition     Decimal? @db.Decimal(10, 2)
+  currency    String?
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  programs Program[]
+  applications Application[]
+  knowledgeBase KnowledgeBase[]
+
+  @@index([name])
+  @@index([country])
+  @@map("universities")
+}
+
+/// Виды документов (Часть 2, п.11 ТЗ). Полноценная загрузка/верификация
+/// документов — Фаза 4; здесь таблица нужна раньше как FK-справочник для
+/// ProgramRequirement (шаблон чек-листа ссылается на тип документа) —
+/// тот же паттерн, что и Role, появившаяся до Admin Panel.
+model DocumentType {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String   @unique
+  description String?
+  /// Soft-delete (Этап 11.3) — hard delete нарушил бы FK: DocumentType
+  /// уже может быть referenced от Document.documentTypeId (NOT NULL) и
+  /// ProgramRequirement.documentTypeId. Тот же принцип, что у University/Program.
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  requirements ProgramRequirement[]
+  checklistItems ChecklistItem[]
+  documents Document[]
+  driveFolders UserDriveFolder[]
+
+  @@map("document_types")
+}
+
+enum DegreeLevel {
+  Bachelor
+  Master
+  PhD
+  Certificate
+}
+
+/// Образовательная программа (Часть 6 + решения по Application-модели).
+/// isActive — soft-delete, как и University: с Фазы 3 на программу
+/// ссылается Application.programId, жёсткое удаление сломало бы историю
+/// уже поданных заявок.
+model Program {
+  id           String      @id @default(uuid()) @db.Uuid
+  universityId String      @map("university_id") @db.Uuid
+  university   University  @relation(fields: [universityId], references: [id])
+  name         String
+  degreeLevel  DegreeLevel @map("degree_level")
+  description  String?     @db.Text
+  duration     String?
+  isActive     Boolean     @default(true) @map("is_active")
+  createdAt    DateTime    @default(now()) @map("created_at")
+  updatedAt    DateTime    @updatedAt @map("updated_at")
+
+  requirements ProgramRequirement[]
+  applications Application[]
+
+  @@index([universityId])
+  @@map("programs")
+}
+
+/// Шаблон требования программы (Этап "решения по Части 6", §5): источник
+/// для одноразового снепшота ChecklistItems при создании Application
+/// (Фаза 3). Сама по себе — не более чем строка конфигурации без
+/// долгоживущих внешних ссылок, поэтому (в отличие от Program/University)
+/// удаляется по-настоящему, а не через isActive.
+model ProgramRequirement {
+  id             String        @id @default(uuid()) @db.Uuid
+  programId      String        @map("program_id") @db.Uuid
+  program        Program       @relation(fields: [programId], references: [id], onDelete: Cascade)
+  documentTypeId String?       @map("document_type_id") @db.Uuid
+  documentType   DocumentType? @relation(fields: [documentTypeId], references: [id])
+  label          String
+  isRequired     Boolean       @default(true) @map("is_required")
+  order          Int           @default(0)
+  createdAt      DateTime      @default(now()) @map("created_at")
+  updatedAt      DateTime      @updatedAt @map("updated_at")
+
+  checklistItems ChecklistItem[]
+
+  @@index([programId])
+  @@map("program_requirements")
+}
+
+enum AdmissionSeason {
+  Fall
+  Spring
+  Summer
+  Winter
+}
+
+/// Глобальный справочник циклов поступления (например "Fall 2027"), не
+/// привязан к конкретному университету — используется разными заявками
+/// в разные вузы (решения по Части 6, §5). isActive — soft-delete по той
+/// же причине, что и University/Program: с Фазы 3 на цикл ссылается
+/// Application.admissionCycleId.
+model AdmissionCycle {
+  id        String          @id @default(uuid()) @db.Uuid
+  name      String
+  season    AdmissionSeason
+  year      Int
+  startDate DateTime        @map("start_date") @db.Date
+  endDate   DateTime        @map("end_date") @db.Date
+  isActive  Boolean         @default(true) @map("is_active")
+  createdAt DateTime        @default(now()) @map("created_at")
+  updatedAt DateTime        @updatedAt @map("updated_at")
+
+  applications Application[]
+
+  @@unique([season, year])
+  @@index([year])
+  @@map("admission_cycles")
+}
+
+enum ApplicationStatus {
+  Planning
+  PreparingDocuments
+  WritingEssays
+  SubmittingApplication
+  Interview
+  WaitingForDecision
+  Accepted
+  Rejected
+  Enrolled
+}
+
+/// Центральная сущность продукта (Часть 6 + решения по архитектуре):
+/// заявка связывает пользователя, университет, программу и цикл
+/// поступления, заменяя собой удалённую UserUniversities.
+///
+/// title генерируется автоматически при создании (из названий вуза,
+/// программы и цикла) — не принимается от клиента, чтобы не плодить
+/// рассинхронизацию между title и реальными связанными сущностями.
+///
+/// currentStage из исходной схемы НЕ хранится отдельным полем: это было
+/// бы дублирование applicationStatus с риском рассинхронизации (админ
+/// меняет статус, забывает обновить текстовую метку). Человекочитаемая
+/// метка вычисляется на лету в API-ответе (см. utils/status-labels).
+model Application {
+  id                String            @id @default(uuid()) @db.Uuid
+  userId            String            @map("user_id") @db.Uuid
+  user              User              @relation(fields: [userId], references: [id])
+  universityId      String            @map("university_id") @db.Uuid
+  university        University        @relation(fields: [universityId], references: [id])
+  programId         String            @map("program_id") @db.Uuid
+  program           Program           @relation(fields: [programId], references: [id])
+  admissionCycleId  String            @map("admission_cycle_id") @db.Uuid
+  admissionCycle    AdmissionCycle    @relation(fields: [admissionCycleId], references: [id])
+  title             String
+  applicationStatus ApplicationStatus @default(Planning) @map("application_status")
+  /// Ближайший ключевой дедлайн. Пока задаётся вручную — автоматический
+  /// расчёт из CalendarEvents появится в Фазе 7, когда модуль календаря
+  /// будет существовать.
+  deadline          DateTime?         @db.Date
+  createdAt         DateTime          @default(now()) @map("created_at")
+  updatedAt         DateTime          @updatedAt @map("updated_at")
+
+  checklist Checklist?
+  applicationDocuments ApplicationDocument[]
+  chat Chat?
+  calendarEvents CalendarEvent[]
+  notes Note[]
+  activityLogEntries ActivityLogEntry[]
+  aiSuggestions AiSuggestion[]
+  mentorComments MentorComment[]
+
+  @@unique([userId, universityId, programId, admissionCycleId])
+  @@index([userId])
+  @@index([applicationStatus])
+  @@map("applications")
+}
+
+enum ChecklistItemCompletedBy {
+  System
+  AI
+  User
+  Mentor
+}
+
+/// Чек-лист заявки — 1:1 с Application, создаётся автоматически вместе
+/// с ней (Этап 3.2). onDelete: Cascade — защита целостности на случай
+/// прямого удаления заявки в БД (REST API удаления заявок не предоставляет).
+model Checklist {
+  id            String   @id @default(uuid()) @db.Uuid
+  applicationId String   @unique @map("application_id") @db.Uuid
+  application   Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  items ChecklistItem[]
+
+  @@map("checklists")
+}
+
+/// Пункт чек-листа — одноразовый СНЕПШОТ ProgramRequirement на момент
+/// создания заявки (решения по Части 6, §1): sourceRequirementId хранится
+/// только для справки/аудита (ON DELETE SET NULL — изменение или удаление
+/// шаблона-требования НЕ должно затрагивать уже созданные пункты).
+model ChecklistItem {
+  id                  String                    @id @default(uuid()) @db.Uuid
+  checklistId         String                    @map("checklist_id") @db.Uuid
+  checklist           Checklist                 @relation(fields: [checklistId], references: [id], onDelete: Cascade)
+  label               String
+  documentTypeId      String?                   @map("document_type_id") @db.Uuid
+  documentType        DocumentType?             @relation(fields: [documentTypeId], references: [id])
+  isCompleted         Boolean                   @default(false) @map("is_completed")
+  completedAt         DateTime?                 @map("completed_at")
+  completedBy         ChecklistItemCompletedBy? @map("completed_by")
+  sourceRequirementId String?                   @map("source_requirement_id") @db.Uuid
+  sourceRequirement   ProgramRequirement?       @relation(fields: [sourceRequirementId], references: [id], onDelete: SetNull)
+  createdAt           DateTime                  @default(now()) @map("created_at")
+  updatedAt            DateTime                  @updatedAt @map("updated_at")
+
+  @@index([checklistId])
+  @@map("checklist_items")
+}
+
+enum DocumentStatus {
+  Uploaded
+  Checking
+  Approved
+  Rejected
+  NeedsReview
+  Expired
+}
+
+/// Документ пользователя (Часть 2, п.10 ТЗ) — "мастер"-запись физического
+/// файла, независимая от заявки (переиспользуется через ApplicationDocuments,
+/// Этап 4.3). driveUrl/driveFileId nullable: сразу после загрузки (Этап 4.1)
+/// файл лежит только во временном локальном хранилище — перенос в Google
+/// Drive и заполнение этих полей происходит в Этапе 4.2.
+model Document {
+  id                 String         @id @default(uuid()) @db.Uuid
+  userId             String         @map("user_id") @db.Uuid
+  user               User           @relation(fields: [userId], references: [id])
+  documentTypeId     String         @map("document_type_id") @db.Uuid
+  documentType       DocumentType   @relation(fields: [documentTypeId], references: [id])
+  fileName           String         @map("file_name")
+  mimeType           String         @map("mime_type")
+  size               Int
+  /// Путь к временно сохранённому файлу на диске backend — до переноса
+  /// в Google Drive (Этап 4.2). После переноса очищается (null).
+  localTempPath      String?        @map("local_temp_path")
+  driveUrl           String?        @map("drive_url")
+  driveFileId        String?        @map("drive_file_id")
+  driveFolderId      String?        @map("drive_folder_id")
+  status             DocumentStatus @default(Uploaded)
+  verificationResult String?        @map("verification_result") @db.Text
+  verifiedAt         DateTime?      @map("verified_at")
+  uploadedAt         DateTime       @default(now()) @map("uploaded_at")
+  createdAt          DateTime       @default(now()) @map("created_at")
+  updatedAt          DateTime       @updatedAt @map("updated_at")
+
+  applicationLinks ApplicationDocument[]
+  mentorComments MentorComment[]
+
+  @@index([userId])
+  @@index([documentTypeId])
+  /// Найдено при ревизии индексов (Этап 12.2): DocumentsReviewService
+  /// (Этап 11.4) фильтрует ГЛОБАЛЬНО по status (очередь NeedsReview по
+  /// всем пользователям, без scoping по userId) — без индекса это полный
+  /// скан таблицы, растущий линейно с числом документов на платформе.
+  @@index([status])
+  @@map("documents")
+}
+
+/// Кэш ID подпапок Google Drive пользователя по видам документов (Этап 4.2).
+/// Без этой таблицы каждая загрузка требовала бы 3-4 запроса к Drive API
+/// только на резолвинг структуры папок (найти/создать Students -> найти/
+/// создать папку пользователя -> найти/создать подпапку типа) — не
+/// масштабируется на "сотни тысяч документов" (Часть 2, п.23 ТЗ).
+/// Структура папок в Drive строится динамически по реальным DocumentType,
+/// а не по жёстко заданному списку из ТЗ (Часть 2, п.21) — тот список не
+/// совпадает 1:1 с уже засеянными 14 видами документов (Часть 2, п.11),
+/// и дублировать его как отдельный источник истины означало бы риск
+/// рассинхронизации при добавлении новых DocumentType через Admin Panel.
+model UserDriveFolder {
+  id             String       @id @default(uuid()) @db.Uuid
+  userId         String       @map("user_id") @db.Uuid
+  user           User         @relation(fields: [userId], references: [id])
+  documentTypeId String       @map("document_type_id") @db.Uuid
+  documentType   DocumentType @relation(fields: [documentTypeId], references: [id])
+  driveFolderId  String       @map("drive_folder_id")
+  createdAt      DateTime     @default(now()) @map("created_at")
+
+  @@unique([userId, documentTypeId])
+  @@map("user_drive_folders")
+}
+
+/// Связь документа с заявкой (Часть 6, п.8 + решения по архитектуре):
+/// позволяет переиспользовать общие документы (паспорт, IELTS) между
+/// несколькими заявками и иметь уникальные (эссе) для конкретной.
+/// Отвязка (DELETE) удаляет только эту связь — физический документ
+/// (запись Document, файл в Drive) не затрагивается, так как может быть
+/// привязан к другим заявкам.
+model ApplicationDocument {
+  id            String      @id @default(uuid()) @db.Uuid
+  applicationId String      @map("application_id") @db.Uuid
+  application   Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  documentId    String      @map("document_id") @db.Uuid
+  document      Document    @relation(fields: [documentId], references: [id])
+  isShared      Boolean     @default(false) @map("is_shared")
+  addedAt       DateTime    @default(now()) @map("added_at")
+
+  @@unique([applicationId, documentId])
+  @@index([applicationId])
+  @@index([documentId])
+  @@map("application_documents")
+}
+
+/// Строчные значения (не PascalCase, как в остальных enum проекта) —
+/// намеренное отклонение: напрямую совпадают с ChatMessage.role в
+/// OpenAiService (Этап 5.1) и ролями OpenAI Chat Completions API, без
+/// маппинга при передаче истории сообщений в Prompt Builder (Этап 5.5).
+enum MessageRole {
+  user
+  assistant
+  system
+}
+
+/// Чат заявки (Часть 2, п.7 ТЗ, актуализировано под Application-модель —
+/// решения по архитектуре, раунд 2, §2.10): один чат на одну заявку,
+/// а не на университет, как в исходной версии схемы. userId
+/// денормализован для быстрой выборки "все чаты пользователя" без join.
+model Chat {
+  id            String      @id @default(uuid()) @db.Uuid
+  applicationId String      @unique @map("application_id") @db.Uuid
+  application   Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  userId        String      @map("user_id") @db.Uuid
+  user          User        @relation(fields: [userId], references: [id])
+  title         String
+  createdAt     DateTime    @default(now()) @map("created_at")
+  updatedAt     DateTime    @updatedAt @map("updated_at")
+
+  messages Message[]
+  aiSessions AiSession[]
+
+  @@index([userId])
+  @@map("chats")
+}
+
+/// Сообщение (Часть 2, п.8 ТЗ). Без updatedAt — сообщения неизменяемы
+/// (append-only), без soft-delete поля — "Запрещается удалять историю
+/// сообщений" (ТЗ), поэтому удаление не предусмотрено вовсе, а не просто
+/// скрыто через isActive.
+model Message {
+  id        String      @id @default(uuid()) @db.Uuid
+  chatId    String      @map("chat_id") @db.Uuid
+  chat      Chat        @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  role      MessageRole
+  content   String      @db.Text
+  tokens    Int?
+  createdAt DateTime    @default(now()) @map("created_at")
+
+  @@index([chatId])
+  @@map("messages")
+}
+
+enum KnowledgeCategory {
+  Admission
+  Scholarships
+  Housing
+  Visa
+  Requirements
+  Programs
+  Deadlines
+  FinancialAid
+  FAQ
+  Contacts
+  Dormitory
+}
+
+/// База знаний по университетам (Часть 2, п.9 ТЗ) — источник для RAG-поиска
+/// AI-ассистента (Фаза 5). embeddingId — ID вектора в Qdrant, заполняется
+/// Embedding Service (Этап 5.4), не здесь: та же последовательность, что
+/// Documents (Этап 4.1) -> Google Drive (Этап 4.2).
+///
+/// В отличие от University/Program/AdmissionCycle — настоящее удаление
+/// (не isActive): на KnowledgeBase ничего не ссылается по FK, риска
+/// нарушить целостность нет.
+model KnowledgeBase {
+  id           String            @id @default(uuid()) @db.Uuid
+  universityId String            @map("university_id") @db.Uuid
+  university   University        @relation(fields: [universityId], references: [id])
+  title        String
+  category     KnowledgeCategory
+  content      String            @db.Text
+  /// Ссылка на источник — обязательна (ТЗ: "Каждая запись должна иметь
+  /// ссылку на источник").
+  source       String
+  embeddingId  String?           @map("embedding_id")
+  createdAt    DateTime          @default(now()) @map("created_at")
+  updatedAt    DateTime          @updatedAt @map("updated_at")
+
+  @@index([universityId])
+  @@index([category])
+  @@map("knowledge_base")
+}
+
+/// Сессия AI-диалога (Часть 2, п.14 ТЗ). "Одна активная сессия на чат"
+/// (п.20 ТЗ) обеспечивается на уровне AiSessionsService (find-or-create),
+/// а не partial unique index в БД — такой constraint (UNIQUE WHERE
+/// endedAt IS NULL) не выражается декларативно в текущей версии Prisma
+/// schema DSL без сырой SQL-миграции.
+model AiSession {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  user       User      @relation(fields: [userId], references: [id])
+  chatId     String    @map("chat_id") @db.Uuid
+  chat       Chat      @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  startedAt  DateTime  @default(now()) @map("started_at")
+  endedAt    DateTime? @map("ended_at")
+  tokensUsed Int       @default(0) @map("tokens_used")
+  model      String
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  @@index([chatId])
+  @@index([userId])
+  @@map("ai_sessions")
+}
+
+enum CalendarEventType {
+  IELTS
+  SAT
+  Deadline
+  Interview
+  Visa
+  Meeting
+  Reminder
+  Application
+  Other
+}
+
+enum CalendarEventPriority {
+  Low
+  Medium
+  High
+  Critical
+}
+
+/// Событие календаря (Часть 2, п.12 ТЗ). applicationId nullable — личное
+/// событие (напоминание вне контекста заявки) или привязанное к конкретной
+/// заявке (дедлайн, интервью). notifiedStages пока не используется — поле
+/// для Этапа 7.3 (cron дедлайнов, защита от повторной отправки
+/// уведомлений), добавлено сейчас, чтобы не делать вторую миграцию схемы
+/// в рамках одной Фазы 7.
+model CalendarEvent {
+  id             String                 @id @default(uuid()) @db.Uuid
+  userId         String                 @map("user_id") @db.Uuid
+  user           User                   @relation(fields: [userId], references: [id])
+  applicationId  String?                @map("application_id") @db.Uuid
+  application    Application?           @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  title          String
+  description    String?                @db.Text
+  type           CalendarEventType
+  date           DateTime
+  completed      Boolean                @default(false)
+  priority       CalendarEventPriority  @default(Medium)
+  notifiedStages Json?                  @map("notified_stages")
+  createdAt      DateTime               @default(now()) @map("created_at")
+  updatedAt      DateTime               @updatedAt @map("updated_at")
+
+  @@index([userId])
+  @@index([applicationId])
+  @@index([date])
+  @@map("calendar_events")
+}
+
+enum NotificationType {
+  System
+  AI
+  Calendar
+  Document
+  University
+  Admin
+}
+
+/// Уведомление (Часть 2, п.13 ТЗ). create() — только внутренний метод
+/// сервиса, без REST POST: все типы подразумевают системную генерацию
+/// (будущий cron дедлайнов — Этап 7.3, авто-проверка документов — Фаза 6,
+/// действия администратора — Фаза 11), а не то, что пользователь создаёт
+/// уведомления сам себе.
+model Notification {
+  id        String           @id @default(uuid()) @db.Uuid
+  userId    String           @map("user_id") @db.Uuid
+  user      User             @relation(fields: [userId], references: [id])
+  title     String
+  message   String           @db.Text
+  type      NotificationType
+  isRead    Boolean          @default(false) @map("is_read")
+  createdAt DateTime         @default(now()) @map("created_at")
+  updatedAt DateTime         @updatedAt @map("updated_at")
+
+  @@index([userId])
+  @@index([isRead])
+  @@map("notifications")
+}
+
+/// Заметка по заявке (решения по Части 6, §11 + раунд 3, §6, п.1).
+/// isInternal — решает открытый вопрос, оставленный на этапе архитектурных
+/// решений ("заметки Mentor должны быть по умолчанию не видны студенту?"):
+/// применяю тот же паттерн, что уже принят для MentorComments.isInternal —
+/// false видят все с доступом к заявке, true — только Mentor/Admin/SuperAdmin.
+/// deletedAt — soft delete с точным временем удаления (а не просто isActive),
+/// как и было явно зафиксировано в исходном решении по схеме.
+model Note {
+  id            String      @id @default(uuid()) @db.Uuid
+  applicationId String      @map("application_id") @db.Uuid
+  application   Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  userId        String      @map("user_id") @db.Uuid
+  user          User        @relation(fields: [userId], references: [id])
+  content       String      @db.Text
+  isPinned      Boolean     @default(false) @map("is_pinned")
+  isInternal    Boolean     @default(false) @map("is_internal")
+  createdAt     DateTime    @default(now()) @map("created_at")
+  updatedAt     DateTime    @updatedAt @map("updated_at")
+  deletedAt     DateTime?   @map("deleted_at")
+
+  @@index([applicationId])
+  @@map("notes")
+}
+
+/// Журнал действий по заявке (Часть 6, §14 ТЗ — narrative-описание без
+/// структуры полей, схема спроектирована самостоятельно). actorId nullable:
+/// часть событий системные (например авто-отметка чек-листа при одобрении
+/// документа, Этап 6.2), а не результат прямого действия человека.
+/// "История доступна пользователю и наставнику" (ТЗ) — та же модель
+/// доступа, что и у Notes/Chat/Checklist (владелец или GLOBAL_READ_ROLES).
+model ActivityLogEntry {
+  id            String       @id @default(uuid()) @db.Uuid
+  applicationId String       @map("application_id") @db.Uuid
+  application   Application  @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  actorId       String?      @map("actor_id") @db.Uuid
+  actor         User?        @relation(fields: [actorId], references: [id])
+  /// Машиночитаемый код события, например "DocumentLinked" — для будущей
+  /// фильтрации/аналитики без парсинга текста description.
+  action        String
+  description   String
+  createdAt     DateTime     @default(now()) @map("created_at")
+
+  @@index([applicationId])
+  @@map("activity_log_entries")
+}
+
+/// Хранимая половина гибридной модели AI-рекомендаций (архитектурное
+/// решение, принятое на этапе планирования, до начала разработки — в
+/// исходном ТЗ таблицы AiSuggestions нет). Простые проверки (незавершённые
+/// пункты чек-листа, приближающийся дедлайн) вычисляются на лету из уже
+/// существующих Checklist/CalendarEvent и НЕ хранятся здесь — эта таблица
+/// только для дорогих в получении (требуют вызова OpenAI) долгосрочных
+/// рекомендаций, которые имеет смысл закэшировать, а не пересчитывать
+/// заново при каждом просмотре.
+model AiSuggestion {
+  id            String      @id @default(uuid()) @db.Uuid
+  applicationId String      @map("application_id") @db.Uuid
+  application   Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  title         String
+  content       String      @db.Text
+  isDismissed   Boolean     @default(false) @map("is_dismissed")
+  createdAt     DateTime    @default(now()) @map("created_at")
+
+  @@index([applicationId])
+  @@map("ai_suggestions")
+}
+
+/// Комментарий наставника (архитектурное решение, принятое на этапе
+/// планирования: "MentorComments как независимая сущность с полем
+/// isInternal") — реализуется только сейчас, на Этапе 10.1, закрывая
+/// пробел между решением и кодом. В отличие от Notes (пишут и студент, и
+/// наставник) — MentorComment создаётся только Mentor/Admin/SuperAdmin,
+/// это обратная связь ОТ наставника, а не общая заметка.
+///
+/// applicationId ИЛИ documentId (хотя бы одно) — комментарий может
+/// относиться и к заявке в целом, и к конкретному документу. Оба nullable
+/// на уровне схемы (Prisma не выражает декларативно "хотя бы одно из
+/// двух" без сырой SQL CHECK-миграции) — проверка на уровне сервиса.
+///
+/// isInternal — тот же паттерн видимости, что и у Notes (Этап 8.1):
+/// false видят все с доступом, true — только Mentor/Admin/SuperAdmin.
+/// deletedAt — soft delete, как и у Notes (обратная связь наставнику
+/// стоит сохранять для истории, а не терять безвозвратно).
+model MentorComment {
+  id            String       @id @default(uuid()) @db.Uuid
+  applicationId String?      @map("application_id") @db.Uuid
+  application   Application? @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  documentId    String?      @map("document_id") @db.Uuid
+  document      Document?    @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  authorId      String       @map("author_id") @db.Uuid
+  author        User         @relation(fields: [authorId], references: [id])
+  content       String       @db.Text
+  isInternal    Boolean      @default(false) @map("is_internal")
+  createdAt     DateTime     @default(now()) @map("created_at")
+  updatedAt     DateTime     @updatedAt @map("updated_at")
+  deletedAt     DateTime?    @map("deleted_at")
+
+  @@index([applicationId])
+  @@index([documentId])
+  @@map("mentor_comments")
+}
+
+/// Системные промпты (Часть 2, п.15 ТЗ) — "Позволяет менять поведение ИИ
+/// без изменения кода". Реализовано не как инертная таблица: PromptBuilderService
+/// (Этап 5.5) обращается сюда за системным промптом чата по ключу `name`
+/// с фолбэком на встроенный дефолт, если запись ещё не создана — Admin
+/// может скорректировать поведение AI-ассистента без деплоя.
+model AiPrompt {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String   @unique
+  description String?
+  prompt      String   @db.Text
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("ai_prompts")
+}
+
+/// Настройки пользователя (Часть 2, п.16 ТЗ) — userId делает это
+/// self-service сущностью (каждый управляет своими), а не тем, чем Admin
+/// управляет для других — реализовано как расширение уже существующей
+/// страницы /settings (Этап 1.4), а не под /admin.
+model UserSettings {
+  id                 String   @id @default(uuid()) @db.Uuid
+  userId             String   @unique @map("user_id") @db.Uuid
+  user               User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  theme              String   @default("Light")
+  language           String   @default("ru")
+  timezone           String   @default("Asia/Almaty")
+  notificationsEmail Boolean  @default(true) @map("notifications_email")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  @@map("user_settings")
+}
+
+/// Платформенный аудит действий администраторов (Roadmap, Этап 11.5) —
+/// принципиально отдельная сущность от ActivityLogEntry (Этап 8.2,
+/// привязан к конкретной заявке): здесь глобальный лог по всем
+/// мутирующим запросам от Admin/SuperAdmin, независимо от того, к какой
+/// заявке (если вообще к какой-либо) относится действие.
+///
+/// Тело запроса намеренно НЕ логируется — оно может содержать
+/// чувствительные данные (например пароль при создании пользователя,
+/// Этап 11.1, ещё до хэширования на уровне сервиса). Аудит фиксирует
+/// ФАКТ действия (кто/что/когда), а не полный diff содержимого.
+model AdminLogEntry {
+  id         String   @id @default(uuid()) @db.Uuid
+  adminId    String   @map("admin_id") @db.Uuid
+  admin      User     @relation(fields: [adminId], references: [id])
+  method     String
+  path       String
+  statusCode Int      @map("status_code")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([adminId])
+  @@index([createdAt])
+  @@map("admin_log_entries")
+}
